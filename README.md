@@ -24,6 +24,22 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Tests
+
+```bash
+pip install pytest
+pytest tests/test_smoke.py -q
+```
+
+## GitHub
+
+Repository: https://github.com/Romababij/text_checker
+
+```bash
+git clone https://github.com/Romababij/text_checker.git
+cd text_checker
+```
+
 Open the URL shown in the terminal (usually http://localhost:8501).
 
 ## Excel format
