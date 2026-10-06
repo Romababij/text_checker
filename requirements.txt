@@ -1,0 +1,6 @@
+streamlit>=1.28.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pyspellchecker>=0.8.0
+lingua-language-detector>=2.0.2
+beautifulsoup4>=4.12.0
