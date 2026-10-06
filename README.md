@@ -1,20 +1,26 @@
 # AutoDoc Multilingual Content Validator
 
-Local Streamlit app for validating multilingual article content in Excel files (AutoDoc content pipeline).
+Streamlit app for validating multilingual automotive article content in Excel files.
 
-## Features
+## Validation layers
 
-- **Level 1:** Foreign script detection (Cyrillic, Greek, CJK, Arabic, Devanagari) for Latin locales
-- **Level 2:** Spellcheck-based foreign/unknown word detection with automotive whitelist
-- **Level 3:** Lingua language mismatch detection on longer texts
-- **British English (`EN_GB` / `ATD_EN`):** flags US spellings (`tires`, `center`, …)
-- **Export:** `validated_articles.xlsx` with `Validation_Status` and pink highlight on problem text cells
+| Layer | Check |
+|-------|--------|
+| **L1** | Forbidden Unicode scripts + Cyrillic/Latin homoglyphs |
+| **L2** | Target-language spelling (pyspellchecker), cross-language hits, optional Lingua mismatch |
+| **L3** | US English terms in British locales (`ATD_EN`, `EN_GB`, `EN`) |
+
+Whitelists ignore HTML/placeholders, SKUs/part numbers, and a base list of brands/OE terms (`whitelists.py` — extend as needed).
+
+## Requirements
+
+- Python 3.10+
 
 ## Setup
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -27,32 +33,28 @@ streamlit run app.py
 ## Tests
 
 ```bash
-pip install pytest
 pytest tests/test_smoke.py -q
+```
+
+## Project layout
+
+```
+app.py              # Streamlit UI
+validator.py        # ContentValidator (L1–L3)
+language_map.py     # Language code → locale
+whitelists.py       # Brands, OE terms, GB/US word lists
+tests/test_smoke.py
 ```
 
 ## GitHub
 
-Repository: https://github.com/Romababij/text_checker
+https://github.com/Romababij/text_checker
 
-```bash
-git clone https://github.com/Romababij/text_checker.git
-cd text_checker
-```
+## Accuracy limits & Hunspell path
 
-Open the URL shown in the terminal (usually http://localhost:8501).
+- **pyspellchecker** ships American English, not Hunspell `en_GB`. British forms are whitelisted; US forms are flagged in L3. Proper `en_GB` coverage: add [Hunspell](https://github.com/wooorm/dictionaries) `en-GB` via `spylls` / `cyhunspell` and replace the L2 backend for `en_GB`.
+- **NL, SV, PL, EL** have no bundled pyspellchecker dictionary — L2 uses cross-language detection only (weaker; more false negatives/positives).
+- **Lingua** on short snippets may skip or mis-detect; L2 treats it as optional signal.
+- Domain terms not in whitelist may appear as unknown words until you extend `whitelists.py` or Hunspell custom `.dic`.
 
-## Excel format
-
-Your file should include at least:
-
-- A column with language codes (`DE`, `NL`, `ATD_EN`, `FR`, …)
-- A column with HTML or plain article text
-
-Select those columns in the UI after upload.
-
-## Notes
-
-- Unknown language codes are reported as issues and skipped for deep checks.
-- Empty cells are marked as **Empty Text**.
-- Dictionary coverage follows `pyspellchecker` languages (EN, DE, FR, ES, PT, IT, RU). For locales without a bundled dictionary (e.g. NL, SV), foreign words are inferred when they match another loaded dictionary.
+Recommended upgrade: per-locale Hunspell dictionaries in `dictionaries/` and a small adapter in `validator.py` calling Hunspell when a `.dic` exists for the locale.

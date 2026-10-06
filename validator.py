@@ -1,294 +1,61 @@
 """
 Multilingual content validator for AutoDoc Excel articles.
-Three layers: script filter, dictionary check, language detection (Lingua).
+
+Layer 1 — Unicode script blocks + Cyrillic/Latin homoglyphs
+Layer 2 — Target-language spellcheck, cross-language hits, optional Lingua mismatch
+Layer 3 — US vs British English for en_GB / ATD_EN / EN
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from enum import Enum
 from html import unescape
 from typing import Iterable, Optional
 
 from bs4 import BeautifulSoup
-from lingua import Language, LanguageDetectorBuilder
+from lingua import LanguageDetectorBuilder
 from spellchecker import SpellChecker
 
-# ---------------------------------------------------------------------------
-# Language mapping
-# ---------------------------------------------------------------------------
-
-LATIN_LOCALES = frozenset(
-    {
-        "en_GB",
-        "de_DE",
-        "nl_NL",
-        "fr_FR",
-        "es_ES",
-        "pt_PT",
-        "sv_SE",
-        "pl_PL",
-        "it_IT",
-        "da_DK",
-        "fi_FI",
-        "ro_RO",
-        "cs_CZ",
-        "hu_HU",
-    }
+from language_map import (
+    CYRILLIC_LOCALES,
+    GREEK_LOCALES,
+    SPELLCHECKER_AVAILABLE,
+    locale_to_lingua,
+    locale_to_spellchecker_lang,
+    normalize_lang_code,
+)
+from whitelists import (
+    AUTO_WHITELIST,
+    BRITISH_EXTRA_WORDS,
+    US_ENGLISH_TERMS,
 )
 
-CYRILLIC_LOCALES = frozenset({"uk_UA", "bg_BG", "ru_RU"})
-GREEK_LOCALES = frozenset({"el_GR"})
-
-# Raw code -> normalized locale key
-LANG_CODE_MAP: dict[str, str] = {
-    "ATD_EN": "en_GB",
-    "EN_GB": "en_GB",
-    "EN-GB": "en_GB",
-    "GB": "en_GB",
-    "EN": "en_GB",
-    "UK_EN": "en_GB",
-    "DE": "de_DE",
-    "DE_DE": "de_DE",
-    "NL": "nl_NL",
-    "NL_NL": "nl_NL",
-    "FR": "fr_FR",
-    "FR_FR": "fr_FR",
-    "ES": "es_ES",
-    "ES_ES": "es_ES",
-    "PT": "pt_PT",
-    "PT_PT": "pt_PT",
-    "SE": "sv_SE",
-    "SV": "sv_SE",
-    "SV_SE": "sv_SE",
-    "PL": "pl_PL",
-    "PL_PL": "pl_PL",
-    "EL": "el_GR",
-    "GR": "el_GR",
-    "EL_GR": "el_GR",
-    "BG": "bg_BG",
-    "BG_BG": "bg_BG",
-    "UK": "uk_UA",
-    "UA": "uk_UA",
-    "UK_UA": "uk_UA",
-    "IT": "it_IT",
-    "IT_IT": "it_IT",
+# Homoglyphs: Cyrillic letters that look like Latin (common AI corruption)
+HOMOGLYPH_MAP: dict[str, str] = {
+    "\u0410": "A",
+    "\u0412": "B",
+    "\u0415": "E",
+    "\u041a": "K",
+    "\u041c": "M",
+    "\u041d": "H",
+    "\u041e": "O",
+    "\u0420": "P",
+    "\u0421": "C",
+    "\u0422": "T",
+    "\u0423": "Y",
+    "\u0425": "X",
+    "\u0430": "a",
+    "\u0435": "e",
+    "\u043e": "o",
+    "\u0440": "p",
+    "\u0441": "c",
+    "\u0443": "y",
+    "\u0445": "x",
+    "\u0456": "i",
+    "\u0458": "j",
 }
 
-
-def normalize_lang_code(raw: object) -> Optional[str]:
-    if raw is None or (isinstance(raw, float) and str(raw) == "nan"):
-        return None
-    code = str(raw).strip().upper().replace("-", "_")
-    if not code:
-        return None
-    if code in LANG_CODE_MAP:
-        return LANG_CODE_MAP[code]
-    if code in LATIN_LOCALES or code in CYRILLIC_LOCALES or code in GREEK_LOCALES:
-        return code
-    # Short codes like EN_GB already handled; try prefix match
-    for key, locale in LANG_CODE_MAP.items():
-        if key == code:
-            return locale
-    return None
-
-
-def locale_to_lingua(locale: str) -> Optional[Language]:
-    mapping = {
-        "en_GB": Language.ENGLISH,
-        "de_DE": Language.GERMAN,
-        "nl_NL": Language.DUTCH,
-        "fr_FR": Language.FRENCH,
-        "es_ES": Language.SPANISH,
-        "pt_PT": Language.PORTUGUESE,
-        "sv_SE": Language.SWEDISH,
-        "pl_PL": Language.POLISH,
-        "el_GR": Language.GREEK,
-        "bg_BG": Language.BULGARIAN,
-        "uk_UA": Language.UKRAINIAN,
-        "it_IT": Language.ITALIAN,
-    }
-    return mapping.get(locale)
-
-
-def locale_to_spellchecker_lang(locale: str) -> Optional[str]:
-    """pyspellchecker language codes (limited set)."""
-    mapping = {
-        "en_GB": "en",
-        "de_DE": "de",
-        "fr_FR": "fr",
-        "es_ES": "es",
-        "pt_PT": "pt",
-        "it_IT": "it",
-        "pl_PL": None,
-        "nl_NL": None,
-        "sv_SE": None,
-        "uk_UA": "ru",
-        "bg_BG": "ru",
-    }
-    lang = mapping.get(locale)
-    if lang is None and locale not in mapping:
-        return None
-    return lang
-
-
-# pyspellchecker actually supports: en, es, de, fr, pt, it, ru, lv, eu — not nl, pl, sv
-SPELLCHECKER_AVAILABLE = frozenset({"en", "de", "fr", "es", "pt", "it", "ru"})
-
-# ---------------------------------------------------------------------------
-# Whitelists & British English
-# ---------------------------------------------------------------------------
-
-AUTO_WHITELIST = frozenset(
-    w.upper()
-    for w in (
-        "BMW",
-        "VW",
-        "Audi",
-        "Mercedes",
-        "Mercedes-Benz",
-        "Opel",
-        "ABS",
-        "ESP",
-        "VIN",
-        "OEN",
-        "OEM",
-        "KW",
-        "HP",
-        "TDI",
-        "CDTI",
-        "ISOFIX",
-        "LED",
-        "DOT4",
-        "AutoDoc",
-        "Autodoc",
-        "VAG",
-        "VW",
-        "SEAT",
-        "Skoda",
-        "Škoda",
-        "Ford",
-        "Toyota",
-        "Renault",
-        "Peugeot",
-        "Citroën",
-        "Citroen",
-        "Volvo",
-        "Saab",
-        "Fiat",
-        "Alfa",
-        "Romeo",
-        "Porsche",
-        "Mini",
-        "Nissan",
-        "Honda",
-        "Hyundai",
-        "Kia",
-        "Mazda",
-        "Subaru",
-        "Suzuki",
-        "Dacia",
-        "Jeep",
-        "Land",
-        "Rover",
-        "Jaguar",
-        "Tesla",
-        "MAN",
-        "DAF",
-        "Iveco",
-        "Scania",
-        "EGR",
-        "DPF",
-        "OBD",
-        "CAN",
-        "ECU",
-        "ASR",
-        "TCS",
-        "ACC",
-        "GPS",
-        "USB",
-        "OBD2",
-        "HTML",
-        "PDF",
-    )
-)
-
-BRITISH_EXTRA_WORDS = frozenset(
-    w.lower()
-    for w in (
-        "tyres",
-        "tyre",
-        "enquiry",
-        "enquiries",
-        "centre",
-        "centres",
-        "colour",
-        "colours",
-        "catalogue",
-        "catalogues",
-        "brake",
-        "disc",
-        "discs",
-        "favour",
-        "favourite",
-        "honour",
-        "labour",
-        "organise",
-        "organised",
-        "recognise",
-        "metre",
-        "litre",
-        "programme",
-        "defence",
-        "licence",
-        "practise",
-        "analyse",
-        "aluminium",
-        "behaviour",
-        "neighbour",
-        "travelling",
-        "cancelled",
-        "modelling",
-    )
-)
-
-US_ENGLISH_TERMS = frozenset(
-    w.lower()
-    for w in (
-        "tires",
-        "tire",
-        "inquiry",
-        "inquiries",
-        "center",
-        "centers",
-        "color",
-        "colors",
-        "catalog",
-        "catalogs",
-        "defense",
-        "license",
-        "organize",
-        "organized",
-        "recognize",
-        "meter",
-        "liter",
-        "program",
-        "analyze",
-        "aluminum",
-        "behavior",
-        "neighbor",
-        "traveling",
-        "canceled",
-        "modeling",
-        "favorite",
-        "honor",
-        "labor",
-        "favor",
-    )
-)
-
-# Script regex blocks (forbidden in Latin texts)
 SCRIPT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Cyrillic", re.compile(r"[\u0400-\u04FF]")),
     ("Greek", re.compile(r"[\u0370-\u03FF]")),
@@ -306,45 +73,46 @@ PLACEHOLDER_RE = re.compile(r"\{[^}]+\}|%[sd]|%\(\w+\)[sd]")
 HTML_ENTITY_RE = re.compile(r"&(?:nbsp|amp|lt|gt|quot|#\d+);", re.I)
 
 
-class IssueType(str, Enum):
-    FOREIGN_SCRIPT = "Foreign Script"
-    FOREIGN_WORD = "Foreign / Unknown Word"
-    US_ENGLISH_IN_GB = "US English term (expected British)"
-    LANGUAGE_MISMATCH = "Language Mismatch"
-    EMPTY_TEXT = "Empty Text"
-    UNKNOWN_LANG = "Unknown Language Code"
-
-
-@dataclass
-class ValidationIssue:
-    issue_type: IssueType
-    detail: str
-
-
 @dataclass
 class RowValidationResult:
     row_index: int
     lang_code_raw: str
     locale: Optional[str]
     text: str
-    issues: list[ValidationIssue] = field(default_factory=list)
+    l1_detail: str = ""
+    l2_detail: str = ""
+    l3_detail: str = ""
     flagged_tokens: list[str] = field(default_factory=list)
+    error_meta: str = ""
 
     @property
     def is_clean(self) -> bool:
-        return len(self.issues) == 0
+        return not (self.l1_detail or self.l2_detail or self.l3_detail or self.error_meta)
+
+    @property
+    def status(self) -> str:
+        return "OK" if self.is_clean else "ISSUE"
 
     @property
     def status_summary(self) -> str:
         if self.is_clean:
             return "OK"
-        parts = [f"{i.issue_type.value}: {i.detail}" for i in self.issues]
+        parts = []
+        if self.error_meta:
+            parts.append(self.error_meta)
+        if self.l1_detail:
+            parts.append(f"L1: {self.l1_detail}")
+        if self.l2_detail:
+            parts.append(f"L2: {self.l2_detail}")
+        if self.l3_detail:
+            parts.append(f"L3: {self.l3_detail}")
         return " | ".join(parts)
 
 
 class ContentValidator:
     LINGUA_CONFIDENCE_THRESHOLD = 0.70
     MIN_TEXT_LENGTH_FOR_LINGUA = 40
+    USE_LINGUA = True
 
     def __init__(self) -> None:
         self._spell_checkers: dict[str, SpellChecker] = {}
@@ -369,82 +137,63 @@ class ContentValidator:
         except Exception:
             raw = re.sub(r"<[^>]+>", " ", raw)
         raw = unescape(raw)
-        raw = re.sub(r"\s+", " ", raw).strip()
-        return raw
+        return re.sub(r"\s+", " ", raw).strip()
 
     def _allowed_scripts_for_locale(self, locale: str) -> set[str]:
         if locale in CYRILLIC_LOCALES:
-            return {"Cyrillic", "Latin"}  # mixed Latin brands OK
+            return {"Cyrillic", "Latin"}
         if locale in GREEK_LOCALES:
             return {"Greek", "Latin"}
         return {"Latin"}
 
-    def check_foreign_scripts(self, text: str, locale: str) -> list[ValidationIssue]:
+    def layer1_script_and_homoglyphs(self, text: str, locale: str) -> str:
         allowed = self._allowed_scripts_for_locale(locale)
-        found: list[str] = []
+        parts: list[str] = []
+
         for name, pattern in SCRIPT_PATTERNS:
             if name in allowed:
                 continue
-            matches = pattern.findall(text)
-            if matches:
-                sample = "".join(sorted(set(matches)))[:20]
-                found.append(f"{name} ({sample!r})")
-        if not found:
-            return []
-        return [
-            ValidationIssue(
-                IssueType.FOREIGN_SCRIPT,
-                "; ".join(found),
-            )
-        ]
+            if pattern.search(text):
+                sample = pattern.findall(text)
+                uniq = "".join(sorted(set(sample)))[:24]
+                parts.append(f"{name} ({uniq!r})")
+
+        homoglyphs: list[str] = []
+        for char in text:
+            if char in HOMOGLYPH_MAP:
+                homoglyphs.append(f"{char}→{HOMOGLYPH_MAP[char]}")
+        if homoglyphs:
+            seen = sorted(set(homoglyphs))[:15]
+            parts.append("Homoglyph: " + ", ".join(seen))
+
+        return "; ".join(parts)
 
     def _is_whitelisted_token(self, token: str) -> bool:
-        upper = token.upper()
-        if upper in AUTO_WHITELIST:
+        if token.upper() in AUTO_WHITELIST:
             return True
         if SKU_RE.match(token):
             return True
         if len(token) <= 2 and token.isalpha():
             return True
-        if token.isdigit():
-            return True
-        return False
+        return token.isdigit()
 
     def _tokenize_words(self, text: str) -> list[str]:
         return WORD_TOKEN_RE.findall(text)
 
-    def check_us_english_in_gb(self, text: str, locale: str) -> list[ValidationIssue]:
-        if locale != "en_GB":
-            return []
-        hits = []
-        for word in self._tokenize_words(text):
-            lw = word.lower()
-            if lw in US_ENGLISH_TERMS:
-                hits.append(word)
-        if not hits:
-            return []
-        unique = sorted(set(hits), key=str.lower)
-        return [
-            ValidationIssue(
-                IssueType.US_ENGLISH_IN_GB,
-                ", ".join(unique[:30]),
-            )
-        ]
-
-    def check_dictionary(
+    def layer2_spelling_and_lingua(
         self, text: str, locale: str
-    ) -> tuple[list[ValidationIssue], list[str]]:
+    ) -> tuple[str, list[str]]:
         sc_lang = locale_to_spellchecker_lang(locale)
         checker = self._get_spellchecker(sc_lang) if sc_lang else None
+        flagged: list[str] = []
 
-        foreign_or_unknown: list[str] = []
-        auxiliary_checkers: list[tuple[str, SpellChecker]] = []
-        for lang in ("en", "de", "fr", "es", "pt", "it"):
+        auxiliary: list[tuple[str, SpellChecker]] = []
+        for lang in ("en", "de", "fr", "es", "pt", "it", "ru"):
             if lang == sc_lang:
                 continue
             aux = self._get_spellchecker(lang)
             if aux:
-                auxiliary_checkers.append((lang, aux))
+                auxiliary.append((lang, aux))
 
         for word in self._tokenize_words(text):
             if self._is_whitelisted_token(word):
@@ -456,57 +205,64 @@ class ContentValidator:
                 continue
 
             if checker is None:
-                # No target dictionary: flag if strongly matches another language
-                for lang, aux in auxiliary_checkers:
+                for lang, aux in auxiliary:
                     if lw in aux:
-                        foreign_or_unknown.append(f"{word} ({lang})")
+                        flagged.append(f"{word} ({lang})")
                         break
                 continue
 
             if lw in checker:
                 continue
             if lw in checker.unknown([lw]):
-                # unknown in target — foreign if known elsewhere
-                for lang, aux in auxiliary_checkers:
+                for lang, aux in auxiliary:
                     if lw in aux:
-                        foreign_or_unknown.append(word)
+                        flagged.append(word)
                         break
                 else:
-                    foreign_or_unknown.append(word)
+                    flagged.append(word)
 
-        if not foreign_or_unknown:
-            return [], []
-        unique = sorted(set(foreign_or_unknown), key=str.lower)
-        return [
-            ValidationIssue(
-                IssueType.FOREIGN_WORD,
-                ", ".join(unique[:40]),
-            )
-        ], unique[:40]
+        unique = sorted(set(flagged), key=str.lower)[:40]
+        spell_part = ", ".join(unique) if unique else ""
 
-    def check_lingua_mismatch(self, text: str, locale: str) -> list[ValidationIssue]:
-        if len(text) < self.MIN_TEXT_LENGTH_FOR_LINGUA:
-            return []
-        expected = locale_to_lingua(locale)
-        if expected is None:
-            return []
-        try:
-            confidences = self._lingua_detector.compute_language_confidence_values(text)
-        except Exception:
-            return []
-        if not confidences:
-            return []
-        top = confidences[0]
-        if top.language == expected:
-            return []
-        if top.value < self.LINGUA_CONFIDENCE_THRESHOLD:
-            return []
-        return [
-            ValidationIssue(
-                IssueType.LANGUAGE_MISMATCH,
-                f"expected {expected.name}, detected {top.language.name} ({top.value:.0%})",
-            )
-        ]
+        lingua_part = ""
+        if self.USE_LINGUA and len(text) >= self.MIN_TEXT_LENGTH_FOR_LINGUA:
+            expected = locale_to_lingua(locale)
+            if expected is not None:
+                try:
+                    confidences = self._lingua_detector.compute_language_confidence_values(
+                        text
+                    )
+                    if confidences:
+                        top = confidences[0]
+                        if (
+                            top.language != expected
+                            and top.value >= self.LINGUA_CONFIDENCE_THRESHOLD
+                        ):
+                            lingua_part = (
+                                f"Lingua mismatch: expected {expected.name}, "
+                                f"detected {top.language.name} ({top.value:.0%})"
+                            )
+                except Exception:
+                    pass
+
+        if spell_part and lingua_part:
+            return f"{spell_part}; {lingua_part}", unique
+        if spell_part:
+            return spell_part, unique
+        if lingua_part:
+            return lingua_part, unique
+        return "", []
+
+    def layer3_us_vs_gb(self, text: str, locale: str) -> str:
+        if locale != "en_GB":
+            return ""
+        hits = []
+        for word in self._tokenize_words(text):
+            if word.lower() in US_ENGLISH_TERMS:
+                hits.append(word)
+        if not hits:
+            return ""
+        return ", ".join(sorted(set(hits), key=str.lower)[:30])
 
     def validate_row(
         self,
@@ -516,8 +272,8 @@ class ContentValidator:
     ) -> RowValidationResult:
         lang_str = "" if lang_raw is None else str(lang_raw).strip()
         text = "" if text_raw is None else str(text_raw)
-
         locale = normalize_lang_code(lang_raw)
+
         result = RowValidationResult(
             row_index=row_index,
             lang_code_raw=lang_str,
@@ -526,39 +282,25 @@ class ContentValidator:
         )
 
         if locale is None:
-            result.issues.append(
-                ValidationIssue(
-                    IssueType.UNKNOWN_LANG,
-                    f"Unmapped language code: {lang_str!r}",
-                )
-            )
+            result.error_meta = f"Unknown language code: {lang_str!r}"
             return result
 
         cleaned = self.clean_text_for_analysis(text)
         if not cleaned:
-            result.issues.append(
-                ValidationIssue(IssueType.EMPTY_TEXT, "No analysable text after cleanup")
-            )
+            result.error_meta = "Empty text after cleanup"
             return result
 
-        result.issues.extend(self.check_foreign_scripts(cleaned, locale))
-        result.issues.extend(self.check_us_english_in_gb(cleaned, locale))
-        dict_issues, flagged = self.check_dictionary(cleaned, locale)
-        result.issues.extend(dict_issues)
-        result.flagged_tokens.extend(flagged)
-        result.issues.extend(self.check_lingua_mismatch(cleaned, locale))
-
+        result.l1_detail = self.layer1_script_and_homoglyphs(cleaned, locale)
+        l2, flagged = self.layer2_spelling_and_lingua(cleaned, locale)
+        result.l2_detail = l2
+        result.flagged_tokens = flagged
+        result.l3_detail = self.layer3_us_vs_gb(cleaned, locale)
         return result
 
-    def validate_dataframe(
-        self,
-        df,
-        lang_column: str,
-        text_column: str,
-    ) -> list[RowValidationResult]:
+    def validate_dataframe(self, df, lang_column: str, text_column: str) -> list[RowValidationResult]:
         results: list[RowValidationResult] = []
         for idx, row in df.iterrows():
-            excel_row = int(idx) + 2  # header + 1-based
+            excel_row = int(idx) + 2
             try:
                 results.append(
                     self.validate_row(
@@ -572,14 +314,9 @@ class ContentValidator:
                     RowValidationResult(
                         row_index=excel_row,
                         lang_code_raw=str(row.get(lang_column, "")),
-                        locale=None,
+                        locale=normalize_lang_code(row.get(lang_column)),
                         text=str(row.get(text_column, "")),
-                        issues=[
-                            ValidationIssue(
-                                IssueType.FOREIGN_WORD,
-                                f"Validation error: {exc}",
-                            )
-                        ],
+                        error_meta=f"Validation error: {exc}",
                     )
                 )
         return results
@@ -592,16 +329,37 @@ def build_results_table(results: Iterable[RowValidationResult]):
     for r in results:
         if r.is_clean:
             continue
-        issue_types = ", ".join(sorted({i.issue_type.value for i in r.issues}))
         rows.append(
             {
                 "Row": r.row_index,
-                "Language Code": r.lang_code_raw,
+                "Language": r.lang_code_raw,
                 "Locale": r.locale or "",
-                "Issue Types": issue_types,
-                "Details": r.status_summary,
-                "Flagged Words/Symbols": ", ".join(r.flagged_tokens),
-                "Text Preview": (r.text[:200] + "…") if len(r.text) > 200 else r.text,
+                "Status": r.status,
+                "L1 (Script/Homoglyph)": r.l1_detail,
+                "L2 (Spelling/Lingua)": r.l2_detail,
+                "L3 (US vs GB)": r.l3_detail,
+                "Flagged tokens": ", ".join(r.flagged_tokens),
+                "Text preview": (r.text[:180] + "…") if len(r.text) > 180 else r.text,
             }
         )
     return pd.DataFrame(rows)
+
+
+def build_full_export_table(results: Iterable[RowValidationResult]):
+    import pandas as pd
+
+    return pd.DataFrame(
+        [
+            {
+                "Row": r.row_index,
+                "Language": r.lang_code_raw,
+                "Locale": r.locale or "",
+                "Validation_Status": r.status,
+                "L1": r.l1_detail,
+                "L2": r.l2_detail,
+                "L3": r.l3_detail,
+                "Details": r.status_summary,
+            }
+            for r in results
+        ]
+    )

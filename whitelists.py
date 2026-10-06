@@ -1,0 +1,158 @@
+"""Automotive and technical whitelist tokens — extend AUTO_BRANDS as needed."""
+
+from __future__ import annotations
+
+# Extend this set with additional marques / model lines used in your catalogue.
+AUTO_BRANDS = frozenset(
+    w.upper()
+    for w in (
+        "BMW",
+        "VW",
+        "Audi",
+        "Mercedes",
+        "Mercedes-Benz",
+        "Opel",
+        "VAG",
+        "SEAT",
+        "Skoda",
+        "Škoda",
+        "Ford",
+        "Toyota",
+        "Renault",
+        "Peugeot",
+        "Citroën",
+        "Citroen",
+        "Volvo",
+        "Saab",
+        "Fiat",
+        "Alfa",
+        "Romeo",
+        "Porsche",
+        "Mini",
+        "Nissan",
+        "Honda",
+        "Hyundai",
+        "Kia",
+        "Mazda",
+        "Subaru",
+        "Suzuki",
+        "Dacia",
+        "Jeep",
+        "Jaguar",
+        "Tesla",
+        "MAN",
+        "DAF",
+        "Iveco",
+        "Scania",
+        "AutoDoc",
+        "Autodoc",
+    )
+)
+
+TECHNICAL_OE_TERMS = frozenset(
+    w.upper()
+    for w in (
+        "ABS",
+        "ESP",
+        "VIN",
+        "OEN",
+        "OEM",
+        "OE",
+        "KW",
+        "HP",
+        "TDI",
+        "CDTI",
+        "ISOFIX",
+        "LED",
+        "DOT4",
+        "EGR",
+        "DPF",
+        "OBD",
+        "OBD2",
+        "CAN",
+        "ECU",
+        "ASR",
+        "TCS",
+        "ACC",
+        "GPS",
+        "USB",
+        "HTML",
+        "PDF",
+    )
+)
+
+AUTO_WHITELIST = AUTO_BRANDS | TECHNICAL_OE_TERMS
+
+BRITISH_EXTRA_WORDS = frozenset(
+    w.lower()
+    for w in (
+        "tyres",
+        "tyre",
+        "enquiry",
+        "enquiries",
+        "centre",
+        "centres",
+        "colour",
+        "colours",
+        "catalogue",
+        "catalogues",
+        "brake",
+        "disc",
+        "discs",
+        "favour",
+        "favourite",
+        "honour",
+        "labour",
+        "organise",
+        "organised",
+        "recognise",
+        "metre",
+        "litre",
+        "programme",
+        "defence",
+        "licence",
+        "practise",
+        "analyse",
+        "aluminium",
+        "behaviour",
+        "neighbour",
+        "travelling",
+        "cancelled",
+        "modelling",
+    )
+)
+
+US_ENGLISH_TERMS = frozenset(
+    w.lower()
+    for w in (
+        "tires",
+        "tire",
+        "inquiry",
+        "inquiries",
+        "center",
+        "centers",
+        "color",
+        "colors",
+        "catalog",
+        "catalogs",
+        "defense",
+        "license",
+        "organize",
+        "organized",
+        "recognize",
+        "meter",
+        "liter",
+        "program",
+        "analyze",
+        "aluminum",
+        "behavior",
+        "neighbor",
+        "traveling",
+        "canceled",
+        "modeling",
+        "favorite",
+        "honor",
+        "labor",
+        "favor",
+    )
+)
